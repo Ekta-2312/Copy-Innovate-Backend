@@ -248,6 +248,9 @@ app.use('/admin', authenticateToken, settingsRouter);
 app.use('/api', authenticateToken, markDonationRouter);
 app.use('/', tokenResponseRouter); // Public route for SMS responses
 
+  app.get("/api/health", (req, res) => {
+  res.status(200).json({ status: "OK" });
+});
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.status(200).json({
