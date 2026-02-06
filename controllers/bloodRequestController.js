@@ -14,8 +14,9 @@ const sendNextBatch = async (requestId) => {
     const request = await BloodRequest.findById(requestId).populate('hospitalId');
     if (!request) return;
 
-    // Check if request is already fulfilled or cancelled
-    if (request.status === 'fulfilled' || request.status === 'cancelled') {
+    // Check if request is still active
+    if (request.status !== 'active') {
+      console.log(`[Batch] Request ${requestId} is not active (Status: ${request.status}). Skipping batch.`);
       return;
     }
 
@@ -62,6 +63,10 @@ const sendNextBatch = async (requestId) => {
 
         // Generate tracking token
         const responseToken = Math.random().toString(36).substr(2, 8);
+
+        // Push token to request's activeTokens
+        request.activeTokens.push(responseToken);
+        await request.save();
 
         await ResponseToken.create({
           token: responseToken,

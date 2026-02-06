@@ -190,28 +190,56 @@ router.post('/mark-donation', async (req, res) => {
       }
     }
 
-    // Update blood request - increment confirmedUnits
+    // Update blood request - ATOMIC increment and fulfillment (Requirement 3 & 4)
     try {
-      // Atomically increment confirmedUnits
+      // 1. Expiry Check (Requirement 5)
+      if (bloodRequest.status === 'active' && bloodRequest.requiredBy && new Date() > bloodRequest.requiredBy) {
+        bloodRequest.status = 'expired';
+        bloodRequest.activeTokens = [];
+        await bloodRequest.save();
+        processingLock.delete(donorId);
+        return res.status(400).json({ success: false, error: 'Blood request has expired.' });
+      }
+
+      // 2. Atomic Update (Requirement 3)
+      const token = locationRecord.token;
       const updatedRequest = await BloodRequest.findOneAndUpdate(
-        { _id: bloodRequest._id },
+        {
+          _id: bloodRequest._id,
+          status: 'active',
+          $expr: { $lt: ["$confirmedUnits", "$quantity"] },
+          // If token-based, check token. If direct share, skip token check.
+          ...(token && !token.startsWith('DIRECT_') ? { activeTokens: token } : {})
+        },
         { $inc: { confirmedUnits: 1 } },
         { new: true }
       );
 
+      if (!updatedRequest) {
+        console.log('❌ Atomic update failed - Request fulfilled, expired, or invalid token');
+        processingLock.delete(donorId);
+        return res.status(400).json({
+          success: false,
+          status: 'closed',
+          error: 'Blood request already fulfilled or expired.'
+        });
+      }
+
+      // 3. Lock Request (Requirement 4)
       if (updatedRequest.confirmedUnits >= updatedRequest.quantity) {
         updatedRequest.status = 'fulfilled';
         updatedRequest.fulfilledAt = new Date();
+        updatedRequest.activeTokens = []; // Clear activeTokens instantly (Requirement 4)
         updatedRequest.batchInProgress = false; // Stop batches
         await updatedRequest.save();
-        console.log('✅ Request fulfilled:', updatedRequest._id, 'Status:', updatedRequest.status);
+        console.log('✅ Request fulfilled and locked:', updatedRequest._id);
       } else {
         console.log(`✅ request confirmedUnits updated: ${updatedRequest.confirmedUnits}/${updatedRequest.quantity}`);
-        // Note: We do NOT trigger sendNextBatch here. 
-        // The response window checker (cron/poll) will handle it if needed.
       }
     } catch (err) {
-      console.log('⚠️ Request update failed (non-critical):', err.message);
+      console.log('⚠️ Request update failed:', err.message);
+      processingLock.delete(donorId);
+      return res.status(500).json({ success: false, error: 'Database update failed' });
     }
 
     // Remove from live map

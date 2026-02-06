@@ -45,17 +45,27 @@ const app = express();
 const allowedOrigins = [
   'http://localhost:5173',
   'http://localhost:5174',
-  'https://donor-location-tracker.onrender.com',
+  'https://raktmap.vercel.app',
+  'https://copy-donor-tracker.vercel.app',
   process.env.FRONTEND_URL
 ].filter(Boolean);
 
 app.use(cors({
   origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl)
     if (!origin) return callback(null, true);
-    if (allowedOrigins.indexOf(origin) === -1) {
-      return callback(new Error('CORS Policy: Access Denied'), false);
+
+    // Check if origin is in allowedOrigins list or matches vercel.app
+    const isAllowed = allowedOrigins.includes(origin) ||
+      origin.endsWith('.vercel.app') ||
+      /https:\/\/.*\.vercel\.app/.test(origin);
+
+    if (isAllowed) {
+      callback(null, true);
+    } else {
+      console.log('CORS blocked origin:', origin);
+      callback(new Error('CORS Policy: Access Denied'), false);
     }
-    return callback(null, true);
   },
   credentials: true
 }));
@@ -261,13 +271,98 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Helper to check and handle blood request expiry
+const checkRequestExpiry = async (requestIdOrToken) => {
+  const BloodRequest = require('./models/BloodRequest');
+  const ResponseToken = require('./models/ResponseToken');
+  const mongoose = require('mongoose');
+
+  let requestId = requestIdOrToken;
+  let token = null;
+
+  // If it's a short token or not a valid ObjectId
+  if (!mongoose.Types.ObjectId.isValid(requestIdOrToken)) {
+    const t = await ResponseToken.findOne({ token: requestIdOrToken });
+    if (t) {
+      requestId = t.requestId;
+      token = t.token;
+    } else {
+      return null;
+    }
+  }
+
+  const request = await BloodRequest.findById(requestId);
+  if (!request) return null;
+
+  // Add token back to request object for validation in other routes
+  if (token) request._token = token;
+
+  if (request.status === 'active' && request.requiredBy && new Date() > request.requiredBy) {
+    console.log(`[Expiry] Request ${requestId} expired`);
+    request.status = 'expired';
+    request.activeTokens = [];
+    await request.save();
+    return request;
+  }
+  return request;
+};
+
+// Public route for Vercel page to check blood request status
+app.get('/api/bloodrequest/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Check for expiry first
+    const request = await checkRequestExpiry(id);
+
+    if (!request) {
+      return res.status(404).json({
+        status: 'closed',
+        message: 'Blood request not found'
+      });
+    }
+
+    const isFulfilled = request.status === 'fulfilled' || request.status === 'cancelled' || request.status === 'expired' || (request.confirmedUnits >= request.quantity);
+
+    if (isFulfilled) {
+      return res.json({
+        success: true,
+        status: 'closed',
+        message: request.status === 'expired' ? 'Blood request has expired.' : 'Blood request fulfilled. Thank you for your time.',
+        data: {
+          requestId: request._id,
+          bloodGroup: request.bloodGroup,
+          status: request.status
+        }
+      });
+    }
+
+    res.json({
+      success: true,
+      status: 'active',
+      data: {
+        requestId: request._id,
+        bloodGroup: request.bloodGroup,
+        quantity: request.quantity,
+        confirmedUnits: request.confirmedUnits,
+        status: request.status,
+        requiredBy: request.requiredBy,
+        hospitalId: request.hospitalId
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching blood request status:', error);
+    res.status(500).json({ success: false, error: 'Server error' });
+  }
+});
+
 // Public route for direct location sharing from frontend
-app.post('/api/donor-location', async (req, res) => {
+app.post('/api/save-location', async (req, res) => {
   try {
     console.log('=== DIRECT LOCATION SHARING FROM FRONTEND ===');
-    const { requestId, donorId, lat, lng } = req.body;
+    const { requestId, donorId, lat, lng, token } = req.body;
 
-    console.log('Received data:', { requestId, donorId, lat, lng });
+    console.log('Received data:', { requestId, donorId, lat, lng, token });
 
     if (!requestId || !donorId || !lat || !lng) {
       return res.status(400).json({
@@ -275,21 +370,33 @@ app.post('/api/donor-location', async (req, res) => {
       });
     }
 
-    // Find the blood request to validate
-    const BloodRequest = require('./models/BloodRequest');
-    const bloodRequest = await BloodRequest.findById(requestId);
+    // 1. Check expiry and get request
+    const bloodRequest = await checkRequestExpiry(requestId);
 
     if (!bloodRequest) {
       return res.status(404).json({ error: 'Blood request not found' });
     }
 
-    // Check if request is already fulfilled
-    if (bloodRequest.status === 'fulfilled' || bloodRequest.status === 'cancelled' || bloodRequest.status === 'completed') {
-      console.log(`❌ Location rejected: Request ${requestId} is ${bloodRequest.status}`);
+    // 2. Strict validation (Requirement 6)
+    const isExpired = new Date() > bloodRequest.requiredBy;
+    const isFulfilled = bloodRequest.status === 'fulfilled' || bloodRequest.status === 'cancelled' || bloodRequest.status === 'completed' || bloodRequest.status === 'expired';
+    const hasEnoughUnits = bloodRequest.confirmedUnits >= bloodRequest.quantity;
+    const isTokenValid = !token || (bloodRequest.activeTokens && bloodRequest.activeTokens.includes(token));
+
+    if (bloodRequest.status !== 'active' || isExpired || isFulfilled || hasEnoughUnits || !isTokenValid) {
+      console.log(`❌ Location rejected: Request ${requestId} is restricted. Status: ${bloodRequest.status}, Fulfilled: ${isFulfilled}, Units: ${bloodRequest.confirmedUnits}/${bloodRequest.quantity}, Token Valid: ${isTokenValid}`);
+
+      // If just expired now
+      if (isExpired && bloodRequest.status === 'active') {
+        bloodRequest.status = 'expired';
+        bloodRequest.activeTokens = [];
+        await bloodRequest.save();
+      }
+
       return res.status(400).json({
         success: false,
-        error: 'Request already fulfilled',
-        message: 'Thank you for your willingness to help, but this blood request has already been fulfilled.'
+        status: 'closed',
+        message: isExpired ? 'Blood request has expired.' : 'Blood request fulfilled. Thank you for your time.'
       });
     }
 
@@ -298,6 +405,45 @@ app.post('/api/donor-location', async (req, res) => {
       bloodGroup: bloodRequest.bloodGroup,
       status: bloodRequest.status
     });
+
+    // 3. Prevent double-counting if this donor already submitted (Requirement 3/4)
+    const existingLocation = await mongoose.connection.db.collection('locations').findOne({
+      requestId: requestId,
+      token: token
+    });
+
+    if (!existingLocation && token) {
+      console.log(`[Confirmation] New confirmation from token ${token}`);
+
+      // Atomic Update (Requirement 3)
+      const updatedRequest = await BloodRequest.findOneAndUpdate(
+        {
+          _id: requestId,
+          status: 'active',
+          $expr: { $lt: ["$confirmedUnits", "$quantity"] },
+          activeTokens: token
+        },
+        { $inc: { confirmedUnits: 1 } },
+        { new: true }
+      );
+
+      if (!updatedRequest) {
+        console.log('❌ Atomic update failed on save-location');
+        return res.status(400).json({
+          success: false,
+          status: 'closed',
+          message: 'Blood request already fulfilled or expired.'
+        });
+      }
+
+      // Lock Request (Requirement 4)
+      if (updatedRequest.confirmedUnits >= updatedRequest.quantity) {
+        updatedRequest.status = 'fulfilled';
+        updatedRequest.activeTokens = [];
+        await updatedRequest.save();
+        console.log('✅ Request fulfilled on save-location');
+      }
+    }
 
     // Try to find donor information
     let donorInfo = null;
@@ -321,30 +467,27 @@ app.post('/api/donor-location', async (req, res) => {
       rollNumber: donorInfo ? donorInfo.rollNumber || '' : '',
       mobileNumber: donorInfo ? donorInfo.phone : '',
       timestamp: new Date(),
-      // IMPORTANT: Store the requestId from the frontend
       requestId: requestId,
       donorId: donorId,
-      token: `DIRECT_${requestId}_${donorId}`, // Generate a unique token
+      token: token || `DIRECT_${requestId}_${donorId}`,
       isAvailable: true,
       responseTime: new Date()
     };
 
-    console.log('Saving location with requestId:', locationData.requestId);
-
-    // Save to locations collection
-    const result = await mongoose.connection.db.collection('locations').insertOne(locationData);
+    // Save to locations collection (Upsert by token to allow updates)
+    await mongoose.connection.db.collection('locations').updateOne(
+      { requestId: requestId, token: locationData.token },
+      { $set: locationData },
+      { upsert: true }
+    );
 
     console.log('✅ Location saved successfully with requestId:', requestId);
 
     res.json({
       success: true,
       message: 'Location shared successfully',
-      data: {
-        locationId: result.insertedId,
-        requestId: requestId,
-        donorId: donorId,
-        coordinates: { lat, lng }
-      }
+      donorId: donorId,
+      qrData: { requestId, token }
     });
 
   } catch (error) {

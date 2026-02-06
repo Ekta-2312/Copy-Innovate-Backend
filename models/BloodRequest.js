@@ -30,12 +30,18 @@ const bloodRequestSchema = new mongoose.Schema({
   patientCondition: String,
   status: {
     type: String,
-    enum: ['pending', 'fulfilled', 'cancelled'],
-    default: 'pending'
+    enum: ['pending', 'active', 'fulfilled', 'cancelled', 'expired'],
+    default: 'active'
   },
   confirmedUnits: {
     type: Number,
     default: 0
+  },
+  activeTokens: [{
+    type: String
+  }],
+  fulfilledAt: {
+    type: Date
   },
   batchSize: {
     type: Number,
