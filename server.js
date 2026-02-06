@@ -177,9 +177,9 @@ db.once('open', async () => {
       try {
         if (mongoose.connection.readyState !== 1) return; // DB not ready
 
-        // Find pending requests that are "in progress"
+        // Find active requests that are "in progress"
         const pendingRequests = await BloodRequest.find({
-          status: 'pending',
+          status: 'active',
           batchInProgress: true,
           $expr: { $lt: ['$confirmedUnits', '$quantity'] }
         });

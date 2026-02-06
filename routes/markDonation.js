@@ -130,7 +130,7 @@ router.post('/mark-donation', async (req, res) => {
     if (!bloodRequest && donorRecord?.bloodGroup) {
       bloodRequest = await BloodRequest.findOne({
         bloodGroup: donorRecord.bloodGroup,
-        status: 'pending'
+        status: 'active'
       }).sort({ createdAt: -1 }); // Get the most recent one
 
       if (bloodRequest) {
@@ -145,7 +145,7 @@ router.post('/mark-donation', async (req, res) => {
         bloodGroup: donorRecord?.bloodGroup || 'O+',
         quantity: 1,
         urgency: 'medium',
-        status: 'pending',  // Changed to pending so it can be fulfilled
+        status: 'active',
         requiredBy: new Date(Date.now() + 24 * 60 * 60 * 1000)
       });
       console.log('Created new request:', bloodRequest._id);
