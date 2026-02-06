@@ -313,15 +313,25 @@ app.get('/api/bloodrequest/:id', async (req, res) => {
 app.post('/api/save-location', async (req, res) => {
   try {
     console.log('=== DIRECT LOCATION SHARING FROM FRONTEND ===');
-    const { requestId, donorId, lat, lng, token } = req.body;
+    const { requestId, donorId, lat, lng, latitude, longitude, token, mobileNumber } = req.body;
 
-    console.log('Received data:', { requestId, donorId, lat, lng, token });
+    // Use flexible field names to support different frontend versions
+    const finalLat = lat || latitude;
+    const finalLng = lng || longitude;
+    const finalDonorId = donorId || mobileNumber;
 
-    if (!requestId || !donorId || !lat || !lng) {
+    console.log('Received data:', { requestId, finalDonorId, finalLat, finalLng, token });
+
+    if (!requestId || !finalDonorId || finalLat === undefined || finalLng === undefined) {
       return res.status(400).json({
-        error: 'Missing required fields: requestId, donorId, lat, lng'
+        error: 'Missing required fields: requestId, donorId (or mobileNumber), lat (or latitude), lng (or longitude)'
       });
     }
+
+    // Use normalized variables for the rest of the route
+    const currentLat = finalLat;
+    const currentLng = finalLng;
+    const currentDonorId = finalDonorId;
 
     // 1. Check expiry and get request
     const bloodRequest = await checkRequestExpiry(requestId);
@@ -402,9 +412,12 @@ app.post('/api/save-location', async (req, res) => {
     let donorInfo = null;
     try {
       const Donor = require('./models/Donor');
-      donorInfo = await Donor.findById(donorId);
+      donorInfo = await Donor.findById(currentDonorId);
       if (!donorInfo) {
-        donorInfo = await Donor.findOne({ uniqueId: donorId });
+        donorInfo = await Donor.findOne({ uniqueId: currentDonorId });
+      }
+      if (!donorInfo && mobileNumber) {
+        donorInfo = await Donor.findOne({ phone: mobileNumber });
       }
     } catch (error) {
       console.log('Could not find donor in database, proceeding with location only');
@@ -413,16 +426,16 @@ app.post('/api/save-location', async (req, res) => {
     // Create location data with proper requestId
     const locationData = {
       address: donorInfo ? `${donorInfo.name} - Current Location` : 'Direct location share',
-      latitude: parseFloat(lat),
-      longitude: parseFloat(lng),
+      latitude: parseFloat(currentLat),
+      longitude: parseFloat(currentLng),
       accuracy: 0,
-      userName: donorInfo ? donorInfo.name : `Donor ${donorId}`,
+      userName: donorInfo ? donorInfo.name : `Donor ${currentDonorId}`,
       rollNumber: donorInfo ? donorInfo.rollNumber || '' : '',
-      mobileNumber: donorInfo ? donorInfo.phone : '',
+      mobileNumber: donorInfo ? donorInfo.phone : (mobileNumber || ''),
       timestamp: new Date(),
       requestId: requestId,
-      donorId: donorId,
-      token: token || `DIRECT_${requestId}_${donorId}`,
+      donorId: currentDonorId,
+      token: token || `DIRECT_${requestId}_${currentDonorId}`,
       isAvailable: true,
       responseTime: new Date()
     };
@@ -439,7 +452,7 @@ app.post('/api/save-location', async (req, res) => {
     res.json({
       success: true,
       message: 'Location shared successfully',
-      donorId: donorId,
+      donorId: currentDonorId,
       qrData: { requestId, token }
     });
 
