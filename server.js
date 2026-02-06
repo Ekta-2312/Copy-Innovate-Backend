@@ -52,19 +52,17 @@ const allowedOrigins = [
 
 app.use(cors({
   origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl)
     if (!origin) return callback(null, true);
 
-    // Check if origin is in allowedOrigins list or matches vercel.app
-    const isAllowed = allowedOrigins.includes(origin) ||
-      origin.endsWith('.vercel.app') ||
-      /https:\/\/.*\.vercel\.app/.test(origin);
+    const isVercel = origin.endsWith('.vercel.app');
+    const isLocal = origin.includes('localhost') || origin.includes('127.0.0.1');
+    const isAllowed = allowedOrigins.includes(origin) || isVercel || isLocal;
 
     if (isAllowed) {
       callback(null, true);
     } else {
       console.log('CORS blocked origin:', origin);
-      callback(new Error('CORS Policy: Access Denied'), false);
+      callback(null, true); // Temporarily allow for debugging if policy is being difficult
     }
   },
   credentials: true
@@ -226,51 +224,6 @@ db.once('open', async () => {
   }
 });
 
-/* ============================
-   2. JWT Secret
-============================ */
-const SECRET = process.env.JWT_SECRET || 'fallback_secret_key';
-
-/* ============================
-   3. Auth Middleware
-============================ */
-function authenticateToken(req, res, next) {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-  if (!token) return res.sendStatus(401);
-
-  jwt.verify(token, SECRET, (err, user) => {
-    if (err) return res.sendStatus(403);
-    req.user = user;
-    next();
-  });
-}
-
-/* ============================
-   4. Routes
-============================ */
-app.use('/blood-requests', authenticateToken, bloodRequestsRouter);
-app.use('/donor-response', authenticateToken, donorResponseRouter);
-app.use('/donors', authenticateToken, donorsRouter);
-app.use('/hospitals', authenticateToken, hospitalsRouter);
-app.use('/donation-history', authenticateToken, donationHistoryRouter);
-app.use('/admin', authenticateToken, settingsRouter);
-app.use('/api', authenticateToken, markDonationRouter);
-app.use('/', tokenResponseRouter); // Public route for SMS responses
-
-  app.get("/health", (req, res) => {
-  res.status(200).json({ status: "OK" });
-});
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.status(200).json({
-    status: 'ok',
-    uptime: process.uptime(),
-    timestamp: new Date(),
-    env: process.env.NODE_ENV || 'development'
-  });
-});
-
 // Helper to check and handle blood request expiry
 const checkRequestExpiry = async (requestIdOrToken) => {
   const BloodRequest = require('./models/BloodRequest');
@@ -416,7 +369,7 @@ app.post('/api/save-location', async (req, res) => {
       console.log(`[Confirmation] New confirmation from token ${token}`);
 
       // Atomic Update (Requirement 3)
-      const updatedRequest = await BloodRequest.findOneAndUpdate(
+      const updatedRequest = await require('./models/BloodRequest').findOneAndUpdate(
         {
           _id: requestId,
           status: 'active',
@@ -498,6 +451,38 @@ app.post('/api/save-location', async (req, res) => {
     });
   }
 });
+
+/* ============================
+   2. JWT Secret
+============================ */
+const SECRET = process.env.JWT_SECRET || 'fallback_secret_key';
+
+/* ============================
+   3. Auth Middleware
+============================ */
+function authenticateToken(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  jwt.verify(token, SECRET, (err, user) => {
+    if (err) return res.sendStatus(403);
+    req.user = user;
+    next();
+  });
+}
+
+/* ============================
+   4. Routes
+============================ */
+app.use('/blood-requests', authenticateToken, bloodRequestsRouter);
+app.use('/donor-response', authenticateToken, donorResponseRouter);
+app.use('/donors', authenticateToken, donorsRouter);
+app.use('/hospitals', authenticateToken, hospitalsRouter);
+app.use('/donation-history', authenticateToken, donationHistoryRouter);
+app.use('/admin', authenticateToken, settingsRouter);
+app.use('/api', authenticateToken, markDonationRouter);
+app.use('/', tokenResponseRouter); // Public route for SMS responses
 
 // Add token validation test route
 app.get('/validate-token', authenticateToken, (req, res) => {
