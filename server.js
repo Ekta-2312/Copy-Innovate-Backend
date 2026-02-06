@@ -369,42 +369,48 @@ app.post('/api/save-location', async (req, res) => {
       status: bloodRequest.status
     });
 
-    // 3. Prevent double-counting if this donor already submitted (Requirement 3/4)
-    const existingLocation = await mongoose.connection.db.collection('locations').findOne({
-      requestId: requestId,
-      token: token
-    });
+    // 4. Handle confirmation logic
+    const actualRequestId = bloodRequest._id.toString();
+    const finalTokenValue = token || `DIRECT_${actualRequestId}_${currentDonorId}`;
 
-    if (!existingLocation && token) {
-      console.log(`[Confirmation] New confirmation from token ${token}`);
+    // If a token exists, we MUST try to confirm the unit atomically
+    if (token) {
+      const existingLocation = await mongoose.connection.db.collection('locations').findOne({
+        requestId: actualRequestId,
+        token: token
+      });
 
-      // Atomic Update (Requirement 3)
-      const updatedRequest = await require('./models/BloodRequest').findOneAndUpdate(
-        {
-          _id: requestId,
-          status: 'active',
-          $expr: { $lt: ["$confirmedUnits", "$quantity"] },
-          activeTokens: token
-        },
-        { $inc: { confirmedUnits: 1 } },
-        { new: true }
-      );
+      if (!existingLocation) {
+        console.log(`[Confirmation] Attempting atomic confirmation for token ${token}`);
 
-      if (!updatedRequest) {
-        console.log('❌ Atomic update failed on save-location');
-        return res.status(400).json({
-          success: false,
-          status: 'closed',
-          message: 'Blood request already fulfilled or expired.'
-        });
-      }
+        // Atomic Update (Requirement 3)
+        const updatedRequest = await require('./models/BloodRequest').findOneAndUpdate(
+          {
+            _id: bloodRequest._id,
+            status: 'active',
+            $expr: { $lt: ["$confirmedUnits", "$quantity"] },
+            activeTokens: token
+          },
+          { $inc: { confirmedUnits: 1 } },
+          { new: true }
+        );
 
-      // Lock Request (Requirement 4)
-      if (updatedRequest.confirmedUnits >= updatedRequest.quantity) {
-        updatedRequest.status = 'fulfilled';
-        updatedRequest.activeTokens = [];
-        await updatedRequest.save();
-        console.log('✅ Request fulfilled on save-location');
+        if (!updatedRequest) {
+          console.log('❌ Atomic update failed - Request likely just fulfilled by someone else');
+          return res.status(400).json({
+            success: false,
+            status: 'closed',
+            message: 'Blood request already fulfilled or expired. Thank you for your willingness!'
+          });
+        }
+
+        // Lock Request if newly fulfilled (Requirement 4)
+        if (updatedRequest.confirmedUnits >= updatedRequest.quantity) {
+          updatedRequest.status = 'fulfilled';
+          updatedRequest.activeTokens = [];
+          await updatedRequest.save();
+          console.log('✅ Request fulfilled and locked via atomic update');
+        }
       }
     }
 
@@ -420,10 +426,10 @@ app.post('/api/save-location', async (req, res) => {
         donorInfo = await Donor.findOne({ phone: mobileNumber });
       }
     } catch (error) {
-      console.log('Could not find donor in database, proceeding with location only');
+      console.log('Could not find donor in database');
     }
 
-    // Create location data with proper requestId
+    // Create location data with proper requestId (ALWAYS use MongoDB ID)
     const locationData = {
       address: donorInfo ? `${donorInfo.name} - Current Location` : 'Direct location share',
       latitude: parseFloat(currentLat),
@@ -433,31 +439,34 @@ app.post('/api/save-location', async (req, res) => {
       rollNumber: donorInfo ? donorInfo.rollNumber || '' : '',
       mobileNumber: donorInfo ? donorInfo.phone : (mobileNumber || ''),
       timestamp: new Date(),
-      requestId: requestId,
+      requestId: actualRequestId, // Use MongoDB ID
       donorId: currentDonorId,
-      token: token || `DIRECT_${requestId}_${currentDonorId}`,
+      token: finalTokenValue,
       isAvailable: true,
       responseTime: new Date()
     };
 
     // Save to locations collection (Upsert by token to allow updates)
     await mongoose.connection.db.collection('locations').updateOne(
-      { requestId: requestId, token: locationData.token },
+      { requestId: actualRequestId, token: locationData.token },
       { $set: locationData },
       { upsert: true }
     );
 
-    console.log('✅ Location saved successfully with requestId:', requestId);
+    console.log('✅ Location saved successfully for Request:', actualRequestId);
 
     res.json({
       success: true,
       message: 'Location shared successfully',
       donorId: currentDonorId,
-      qrData: { requestId, token }
+      qrData: {
+        requestId: actualRequestId, // ALWAYS send the full MongoDB ID
+        token: token
+      }
     });
 
   } catch (error) {
-    console.error('Error in direct location sharing:', error);
+    console.error('Error in location sharing:', error);
     res.status(500).json({
       error: 'Failed to save location',
       details: error.message
