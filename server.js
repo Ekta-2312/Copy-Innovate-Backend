@@ -333,6 +333,39 @@ app.post('/api/save-location', async (req, res) => {
     const currentLng = finalLng;
     const currentDonorId = finalDonorId;
 
+    // Verify donor existence in Donor collection (Mandatory)
+    const Donor = require('./models/Donor');
+    const cleanPhone = mobileNumber ? mobileNumber.replace(/^\+91|^0/, '') : '';
+
+    let donorInfo = await Donor.findOne({
+      $or: [
+        { phone: mobileNumber },
+        { phone: cleanPhone },
+        { phone: '+91' + cleanPhone },
+        { phone: '0' + cleanPhone }
+      ]
+    });
+
+    if (!donorInfo && currentDonorId) {
+      // Try by ID if phone lookup failed but donorId was provided (unlikely but possible)
+      const mongoose = require('mongoose');
+      if (mongoose.Types.ObjectId.isValid(currentDonorId)) {
+        donorInfo = await Donor.findById(currentDonorId);
+      } else {
+        donorInfo = await Donor.findOne({ uniqueId: currentDonorId });
+      }
+    }
+
+    if (!donorInfo) {
+      console.log(`❌ Rejecting unauthorized number: ${mobileNumber}`);
+      return res.status(403).json({
+        success: false,
+        error: 'Registration Required: Your mobile number is not found in our database of eligible donors. Only registered donors can submit responses.'
+      });
+    }
+
+    console.log(`✅ Authorized donor found: ${donorInfo.name} (${donorInfo.bloodGroup})`);
+
     // 1. Check expiry and get request
     const bloodRequest = await checkRequestExpiry(requestId);
 
@@ -371,7 +404,7 @@ app.post('/api/save-location', async (req, res) => {
 
     // 4. Handle confirmation logic
     const actualRequestId = bloodRequest._id.toString();
-    const finalTokenValue = token || `DIRECT_${actualRequestId}_${currentDonorId}`;
+    const finalTokenValue = token || `DIRECT_${actualRequestId}_${donorInfo._id}`;
 
     // If a token exists, we MUST try to confirm the unit atomically
     if (token) {
@@ -414,33 +447,20 @@ app.post('/api/save-location', async (req, res) => {
       }
     }
 
-    // Try to find donor information
-    let donorInfo = null;
-    try {
-      const Donor = require('./models/Donor');
-      donorInfo = await Donor.findById(currentDonorId);
-      if (!donorInfo) {
-        donorInfo = await Donor.findOne({ uniqueId: currentDonorId });
-      }
-      if (!donorInfo && mobileNumber) {
-        donorInfo = await Donor.findOne({ phone: mobileNumber });
-      }
-    } catch (error) {
-      console.log('Could not find donor in database');
-    }
+    // Create location data using verified donor information
 
     // Create location data with proper requestId (ALWAYS use MongoDB ID)
     const locationData = {
-      address: donorInfo ? `${donorInfo.name} - Current Location` : 'Direct location share',
+      address: `${donorInfo.name} - Current Location`,
       latitude: parseFloat(currentLat),
       longitude: parseFloat(currentLng),
       accuracy: 0,
-      userName: donorInfo ? donorInfo.name : `Donor ${currentDonorId}`,
-      rollNumber: donorInfo ? donorInfo.rollNumber || '' : '',
-      mobileNumber: donorInfo ? donorInfo.phone : (mobileNumber || ''),
+      userName: donorInfo.name,
+      rollNumber: donorInfo.rollNo || '',
+      mobileNumber: donorInfo.phone,
       timestamp: new Date(),
       requestId: actualRequestId, // Use MongoDB ID
-      donorId: currentDonorId,
+      donorId: donorInfo._id.toString(),
       token: finalTokenValue,
       isAvailable: true,
       responseTime: new Date()
